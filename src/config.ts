@@ -2,7 +2,7 @@
  * Plugin option resolution. Options can be supplied through the plugin
  * entry in `tui.json` (or the opencode config `plugin` array), e.g.:
  *
- *   "plugin": [["opencode-cost-guard", { "providers": ["deepseek"], "dryRun": true }]]
+ *   "plugin": [["opencode-peak-guard", { "providers": ["deepseek"], "dryRun": true }]]
  */
 import {
   type PeakWindow,

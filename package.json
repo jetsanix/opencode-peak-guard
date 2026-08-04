@@ -1,5 +1,5 @@
 {
-  "name": "opencode-cost-guard",
+  "name": "opencode-peak-guard",
   "version": "0.1.0",
   "description": "opencode TUI plugin: intercept prompt submission during model peak-pricing windows (e.g. DeepSeek x2) and offer to wait until off-peak",
   "type": "module",

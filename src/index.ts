@@ -1,5 +1,5 @@
 /**
- * opencode-cost-guard — TUI plugin.
+ * opencode-peak-guard — TUI plugin.
  *
  * Intercepts Enter on the session prompt while the active model's provider
  * is in a peak-pricing window (DeepSeek: 09:00-12:00 / 14:00-18:00 Beijing
@@ -262,6 +262,6 @@ function providerLabel(providerID: string | undefined): string {
  * also export `id`.
  */
 export default {
-  id: "opencode-cost-guard",
+  id: "opencode-peak-guard",
   tui: CostGuard,
 }

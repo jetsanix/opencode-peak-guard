@@ -1,4 +1,4 @@
-# opencode-cost-guard
+# opencode-peak-guard
 
 An [opencode](https://opencode.ai) **TUI plugin** that intercepts prompt
 submission during **model peak-pricing windows** and offers to wait until
@@ -28,12 +28,12 @@ behaves exactly as before.
 ```bash
 # 1. Clone / symlink the plugin into opencode's plugin directory
 mkdir -p ~/.config/opencode/plugins
-ln -s /path/to/opencode-cost-guard ~/.config/opencode/plugins/opencode-cost-guard
+ln -s /path/to/opencode-peak-guard ~/.config/opencode/plugins/opencode-peak-guard
 
 # 2. Enable it in the TUI config.
 # File plugins are referenced by path (a bare name is treated as an npm
 # package and would fail to resolve), so use the absolute path:
-#   { "plugin": ["oh-my-opencode-slim", "/home/<you>/.config/opencode/plugins/opencode-cost-guard"] }
+#   { "plugin": ["oh-my-opencode-slim", "/home/<you>/.config/opencode/plugins/opencode-peak-guard"] }
 #
 # 3. Restart opencode
 ```
@@ -56,7 +56,7 @@ Options are supplied as the plugin entry array in `tui.json`:
 ```jsonc
 {
   "plugin": [
-    ["opencode-cost-guard", {
+    ["opencode-peak-guard", {
       "providers": ["deepseek"],
       "windows": [[9, 12], [14, 18]],
       "multiplier": 2,
