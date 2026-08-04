@@ -25,6 +25,19 @@ behaves exactly as before.
 
 ## Install
 
+### From npm (recommended)
+
+Add the package name to the `plugin` array in `~/.config/opencode/tui.json`
+and restart opencode — it is installed automatically:
+
+```jsonc
+{
+  "plugin": ["opencode-peak-guard"]
+}
+```
+
+### From source (development)
+
 ```bash
 # 1. Clone / symlink the plugin into opencode's plugin directory
 mkdir -p ~/.config/opencode/plugins
