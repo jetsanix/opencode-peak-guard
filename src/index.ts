@@ -10,10 +10,21 @@
  *   2. Wait until off-peak  — keep the draft; nothing is sent,
  *   3. Cancel               — keep the draft, do not send.
  *
- * Implementation notes (verified against opencode 1.18.x source):
+ * Implementation notes (verified against opencode 1.18.x source and by
+ * end-to-end testing in the TUI):
  * - The `session_prompt` slot (mode "replace") is registered so the host
  *   `ui.Prompt` keeps rendering (identical UI) while we capture its
  *   `TuiPromptRef` (focused / submit / focus / set).
+ * - Host UI components are invoked as plain function calls
+ *   (`api.ui.Prompt({...})`, `api.ui.DialogSelect({...})`) instead of JSX.
+ *   opencode loads plugins with bun's plain `import()`; bun's TSX
+ *   transpilation resolves the JSX runtime from the CWD project config and
+ *   defaults to React, so `.tsx` plugin sources fail to load unless
+ *   pre-compiled. Direct calls sidestep the JSX runtime entirely and match
+ *   how the published oh-my-opencode-slim plugin ships.
+ * - opencode's plugin entry resolution only considers `exports["./tui"]`
+ *   for TUI plugins (or an index file at the package root), so package.json
+ *   must expose a `./tui` subpath export.
  * - A keymap layer (priority above the host default, `mode: "base"`) binds
  *   Enter to our own command. The binding's default `preventDefault` /
  *   `fallthrough` semantics consume the key, so the host submit never runs
@@ -53,7 +64,7 @@ export interface CostGuardPluginOptions {
 const ENTER_COMMAND = "costguard.enter"
 const FORCE_COMMAND = "costguard.force"
 
-/** Props the host passes to the `session_prompt` slot. */
+/** Props the host passes to the `session_prompt` slot renderer. */
 type SessionPromptSlotProps = {
   session_id: string
   visible?: boolean
@@ -79,23 +90,22 @@ export const CostGuard: TuiPlugin = async (api, rawOptions) => {
 
   api.slots.register({
     slots: {
+      // Direct component call (no JSX): see file header for rationale.
       session_prompt: (
         _ctx: Readonly<TuiSlotContext>,
         props: SessionPromptSlotProps,
       ) => {
         state.sessionID = props.session_id
-        return (
-          <api.ui.Prompt
-            sessionID={props.session_id}
-            visible={props.visible}
-            disabled={props.disabled}
-            ref={(ref) => {
-              state.promptRef = ref
-              props.ref?.(ref)
-            }}
-            onSubmit={props.on_submit}
-          />
-        )
+        return api.ui.Prompt({
+          sessionID: props.session_id,
+          visible: props.visible,
+          disabled: props.disabled,
+          ref: (ref) => {
+            state.promptRef = ref
+            props.ref?.(ref)
+          },
+          onSubmit: props.on_submit,
+        })
       },
     },
   })
@@ -189,11 +199,11 @@ async function handleEnter(
   }
 
   api.ui.dialog.replace(
-    () => (
-      <api.ui.DialogSelect
-        title={`${providerLabel(model?.providerID)} peak pricing is active (x${options.multiplier})`}
-        placeholder="How do you want to proceed?"
-        options={[
+    () =>
+      api.ui.DialogSelect({
+        title: `${providerLabel(model?.providerID)} peak pricing is active (x${options.multiplier})`,
+        placeholder: "How do you want to proceed?",
+        options: [
           {
             title: "Send now",
             value: "now",
@@ -209,8 +219,8 @@ async function handleEnter(
             value: "cancel",
             description: "Keep the draft and do not send",
           },
-        ]}
-        onSelect={(option) => {
+        ],
+        onSelect: (option) => {
           api.ui.dialog.clear()
           const prompt = state.promptRef
           if (option.value === "now") {
@@ -225,9 +235,8 @@ async function handleEnter(
           } else {
             prompt?.focus()
           }
-        }}
-      />
-    ),
+        },
+      }),
     () => {
       state.dialogOpen = false
     },

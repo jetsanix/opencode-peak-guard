@@ -30,14 +30,24 @@ behaves exactly as before.
 mkdir -p ~/.config/opencode/plugins
 ln -s /path/to/opencode-cost-guard ~/.config/opencode/plugins/opencode-cost-guard
 
-# 2. Enable it in the TUI config
-# Add "opencode-cost-guard" to the "plugin" array in ~/.config/opencode/tui.json:
-#   { "plugin": ["oh-my-opencode-slim", "opencode-cost-guard"] }
-
+# 2. Enable it in the TUI config.
+# File plugins are referenced by path (a bare name is treated as an npm
+# package and would fail to resolve), so use the absolute path:
+#   { "plugin": ["oh-my-opencode-slim", "/home/<you>/.config/opencode/plugins/opencode-cost-guard"] }
+#
 # 3. Restart opencode
 ```
 
 Requires opencode >= 1.18 (TUI plugin API, `@opencode-ai/plugin`).
+
+> **Verified end-to-end** (opencode 1.18.12): with the plugin enabled, pressing
+> Enter on the session prompt during a DeepSeek peak window shows the choice
+> dialog and does not send until you pick an option. Two load-time gotchas were
+> found and fixed during testing — `package.json` must expose a `./tui` export
+> (opencode's entry resolution only looks for `exports["./tui"]` or a root
+> index file), and the plugin must not rely on TSX/JSX (bun transpiles plugin
+> sources with the CWD's JSX config, which defaults to React; see
+> `src/index.ts` header for details).
 
 ## Options
 
