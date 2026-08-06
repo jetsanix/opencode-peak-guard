@@ -98,18 +98,21 @@ Options are supplied as the plugin entry array in `tui.json`:
 
 1. The plugin registers the `session_prompt` TUI slot and re-renders the host's
    own `Prompt` component (identical UI) while capturing its `TuiPromptRef`.
-2. A keymap layer (priority above the host default, scoped to `mode: "base"`)
-   binds **Enter** to our command. The binding consumes the key event
-   (`preventDefault`/`fallthrough` defaults), so the host submit never fires on
-   its own.
-3. The handler checks: dialog open? → skip; prompt focused? → otherwise forward
-   Enter via `input.submit` (permission/question prompts keep native behavior);
-   provider in `providers`? time in a peak window? → open the choice dialog via
-   `api.ui.dialog`; **Send now** calls `TuiPromptRef.submit()`, **Wait/Cancel**
-   keep the draft untouched.
-4. While any modal dialog is open the keymap is in `"modal"` mode, so our
-   "base"-scoped Enter binding is inactive and dialogs keep their own Enter
-   handling.
+2. Enter is intercepted with a key intercept hook (`api.keymap.intercept`,
+   priority above the host default) instead of a keymap binding. A binding
+   unconditionally consumes the key once it matches — which shadows the host's
+   own `return` → "confirm permission" binding (default priority 0) and breaks
+   Enter-to-confirm on permission/question prompts. The hook decides per
+   keypress: it consumes the key only when the session prompt is focused, no
+   permission/question gate is pending, and the provider is inside a peak
+   window; otherwise it passes the key through so the host handles it natively
+   (submit the prompt, confirm a permission, etc.).
+3. The handler checks: dialog open? → skip; prompt focused? → otherwise pass
+   through; provider in `providers`? time in a peak window? → open the choice
+   dialog via `api.ui.dialog`; **Send now** calls `TuiPromptRef.submit()`,
+   **Wait/Cancel** keep the draft untouched.
+4. While any modal dialog is open the dialog guard makes the hook pass Enter
+   through to the host, so dialogs keep their own Enter handling.
 
 See `docs/FEASIBILITY.md` for the full research behind this design.
 

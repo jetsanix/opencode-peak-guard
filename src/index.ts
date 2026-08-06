@@ -25,16 +25,18 @@
  * - opencode's plugin entry resolution only considers `exports["./tui"]`
  *   for TUI plugins (or an index file at the package root), so package.json
  *   must expose a `./tui` subpath export.
- * - A keymap layer (priority above the host default, `mode: "base"`) binds
- *   Enter to our own command. The binding's default `preventDefault` /
- *   `fallthrough` semantics consume the key, so the host submit never runs
- *   on its own.
- * - When the prompt is not focused (permission/question prompts, other
- *   textareas) Enter is forwarded via `input.submit` so native behavior is
- *   preserved. While the host gates the prompt (pending permission or
- *   question) native Enter does nothing, and we mirror that.
- * - Modals push the `"modal"` keymap mode, so our "base"-scoped binding is
- *   inactive while any dialog is open (including our own DialogSelect).
+ * - Enter is intercepted with a key intercept hook (`api.keymap.intercept`,
+ *   priority above the host default) instead of a keymap binding. A binding
+ *   unconditionally consumes the key once it matches, which shadows the
+ *   host's own `return` binding on the permission/question prompts (the host
+ *   binds `return` to confirm permission selection at default priority) and
+ *   breaks Enter-to-confirm. An intercept hook lets us decide per-keypress:
+ *   consume the key only when the session prompt is focused, not gated, and
+ *   the provider is inside a peak window; otherwise pass the key through so
+ *   the host handles it natively (submit the prompt, confirm a permission,
+ *   etc.).
+ * - While any modal dialog is open (including our own DialogSelect) the
+ *   dialog guard makes us pass Enter through to the host.
  */
 import type {
   TuiPlugin,
@@ -42,7 +44,6 @@ import type {
   TuiPromptRef,
   TuiSlotContext,
 } from "@opencode-ai/plugin/tui"
-import { InputRenderable, TextareaRenderable } from "@opentui/core"
 import type { CostGuardOptions } from "./config"
 import { resolveOptions } from "./config"
 import {
@@ -61,8 +62,24 @@ export interface CostGuardPluginOptions {
   forceKey?: string
 }
 
-const ENTER_COMMAND = "costguard.enter"
 const FORCE_COMMAND = "costguard.force"
+
+/**
+ * Structural subset of the keymap `intercept("key", ...)` context that this
+ * plugin relies on (the full type comes from @opentui/keymap).
+ */
+type KeyInterceptContext = {
+  event: {
+    name: string
+    eventType: string
+    ctrl: boolean
+    meta: boolean
+    shift: boolean
+    option: boolean
+    super?: boolean
+  }
+  consume: (options?: { preventDefault?: boolean; stopPropagation?: boolean }) => void
+}
 
 /** Props the host passes to the `session_prompt` slot renderer. */
 type SessionPromptSlotProps = {
@@ -110,22 +127,29 @@ export const CostGuard: TuiPlugin = async (api, rawOptions) => {
     },
   })
 
+  // Intercept Enter at a priority above the host's layers. Unlike a keymap
+  // binding — which consumes the key whenever it matches — the hook can pass
+  // the key through to the host unless the cost guard actually wants to act:
+  // a plain `return` binding here would shadow the host's own `return` →
+  // "confirm permission" binding (default priority 0) and make it impossible
+  // to confirm permission prompts with Enter.
+  const offIntercept = api.keymap.intercept(
+    "key",
+    (ctx: KeyInterceptContext) => {
+      void handleKey(api, options, state, ctx)
+    },
+    { priority: 10_000 },
+  )
+
+  // The force key stays a keymap binding: it is a non-conflicting key, and
+  // the keymap engine does the exact key matching for us.
   const layerDispose = api.keymap.registerLayer({
     priority: 10_000,
     mode: "base",
-    bindings: [
-      { key: "return", cmd: ENTER_COMMAND },
-      ...(options.forceKey
-        ? [{ key: options.forceKey, cmd: FORCE_COMMAND }]
-        : []),
-    ],
+    bindings: options.forceKey
+      ? [{ key: options.forceKey, cmd: FORCE_COMMAND }]
+      : [],
     commands: [
-      {
-        name: ENTER_COMMAND,
-        run: () => {
-          void handleEnter(api, options, state)
-        },
-      },
       {
         name: FORCE_COMMAND,
         run: () => {
@@ -136,34 +160,35 @@ export const CostGuard: TuiPlugin = async (api, rawOptions) => {
   })
 
   api.lifecycle.onDispose(() => {
+    offIntercept()
     layerDispose()
   })
 }
 
-async function handleEnter(
+async function handleKey(
   api: TuiPluginApi,
   options: CostGuardOptions,
   state: GuardState,
+  ctx: KeyInterceptContext,
 ): Promise<void> {
+  // Only plain Enter presses — mirror the old `{ key: "return" }` binding,
+  // which matches a modifier-less return keypress.
+  const event = ctx.event
+  if (event.eventType !== "press" || event.name !== "return") return
+  if (event.ctrl || event.meta || event.shift || event.option || event.super) return
+
+  // A dialog is open (including our own DialogSelect): the host handles keys
+  // in "modal" mode; never intercept.
   if (state.dialogOpen || api.ui.dialog.open) return
   const ref = state.promptRef
 
-  // Some other input is focused (e.g. the permission prompt): forward Enter
-  // so native behavior is preserved. `input.submit` is the managed-textarea
-  // command that the default Enter binding dispatches.
-  if (!ref?.focused) {
-    const focused = api.renderer.currentFocusedEditor
-    if (
-      focused instanceof TextareaRenderable ||
-      focused instanceof InputRenderable
-    ) {
-      await api.keymap.dispatchCommand("input.submit")
-    }
-    return
-  }
+  // Some other input is focused (permission/question docks, other textareas):
+  // pass Enter through so the host handles it natively — the permission
+  // prompt binds `return` to confirm its selected option.
+  if (!ref?.focused) return
 
-  // The host disables the prompt while permission/question prompts are
-  // pending; native Enter then does nothing. Mirror that (parity).
+  // The host gates the prompt while permission/question prompts are pending;
+  // pass Enter through and keep native behavior.
   const sessionID = state.sessionID
   const hasPendingGate =
     sessionID !== undefined &&
@@ -172,16 +197,10 @@ async function handleEnter(
   if (hasPendingGate) return
 
   const model = sessionID ? api.state.session.get(sessionID)?.model : undefined
-  if (!isTargetProvider(model?.providerID, options.providers)) {
-    ref.submit()
-    return
-  }
+  if (!isTargetProvider(model?.providerID, options.providers)) return
 
   const now = new Date()
-  if (!isPeakTime(now, options)) {
-    ref.submit()
-    return
-  }
+  if (!isPeakTime(now, options)) return
 
   const offPeakLabel = formatScheduleClock(
     nextOffPeakEnd(now, options),
@@ -189,14 +208,18 @@ async function handleEnter(
   )
 
   if (options.dryRun) {
-    ref.submit()
     api.ui.toast({
       variant: "info",
       title: "Cost Guard (dry-run)",
       message: `Peak pricing x${options.multiplier} active for ${model?.providerID}. Would offer to wait until ${offPeakLabel}. Sent anyway.`,
     })
+    // Do not consume: let the host submit normally.
     return
   }
+
+  // Consume the key (synchronously) so the host's submit binding never runs,
+  // then offer the peak-pricing choice instead.
+  ctx.consume()
 
   api.ui.dialog.replace(
     () =>
