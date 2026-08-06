@@ -17,6 +17,7 @@ provider is in a peak window, instead of sending immediately you get a choice:
 | Option | Behavior |
 | ------ | -------- |
 | Send now | Submits the message at the peak (x2) price |
+| Auto-submit at off-peak | Locks the draft and sends it automatically when the current peak window ends (no keypress needed) |
 | Wait until off-peak | Keeps your draft; nothing is sent — press Enter again later |
 | Cancel | Keeps your draft; nothing is sent |
 
@@ -110,9 +111,24 @@ Options are supplied as the plugin entry array in `tui.json`:
 3. The handler checks: dialog open? → skip; prompt focused? → otherwise pass
    through; provider in `providers`? time in a peak window? → open the choice
    dialog via `api.ui.dialog`; **Send now** calls `TuiPromptRef.submit()`,
-   **Wait/Cancel** keep the draft untouched.
+   **Auto-submit at off-peak** registers a timer for the window end that later
+   submits the draft (see below), **Wait/Cancel** keep the draft untouched.
 4. While any modal dialog is open the dialog guard makes the hook pass Enter
    through to the host, so dialogs keep their own Enter handling.
+
+The auto-submit timer fires at the exact end of the current peak window and
+then submits only if it is still safe and meaningful: the same session is
+active, the draft is non-empty, and no modal dialog or host gate (pending
+permission/question) blocks submission — blocked attempts retry for about a
+minute before giving up with a toast. Any real submission (including a manual
+Enter before the window ends, or the `forceKey`) cancels the pending timer, so
+a draft is never sent twice.
+
+While a lock is pending, pressing Enter never submits: it re-opens the choice
+dialog (titled with the pending release time) so you can reschedule, send now,
+or cancel. The draft stays visible and editable until it is sent — the lock
+covers submission, not typing (the TUI slot API cannot render-lock the host's
+prompt from a plugin).
 
 See `docs/FEASIBILITY.md` for the full research behind this design.
 
@@ -131,8 +147,10 @@ bunx tsc --noEmit # typecheck
 - Home-route prompt submission is not gated (session prompt only).
 - Enter on a non-editor, non-dialog focus target while in base mode is consumed
   by the plugin and not re-dispatched (rare; documented in the source).
-- Auto-send at off-peak is intentionally not implemented: the draft stays in
-  the input box and you press Enter again.
+- Auto-submit fires only while opencode stays running: if the process exits
+  before the peak window ends, the draft simply stays in the input box.
+- While an auto-submit lock is pending, the draft remains editable (the lock
+  blocks submission, not typing).
 
 ## License
 

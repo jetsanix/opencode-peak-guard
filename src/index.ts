@@ -6,9 +6,13 @@
  * time, all billing items x2). When peak pricing is active the user is
  * asked how to proceed:
  *
- *   1. Send now             — submit at the peak price,
- *   2. Wait until off-peak  — keep the draft; nothing is sent,
- *   3. Cancel               — keep the draft, do not send.
+ *   1. Send now                — submit at the peak price,
+ *   2. Auto-submit at off-peak — lock the draft; it is sent automatically
+ *      when the current peak window ends (requires opencode to stay
+ *      running). While locked, Enter cannot submit: it opens this dialog
+ *      again so the lock can be managed,
+ *   3. Wait until off-peak     — keep the draft; nothing is sent,
+ *   4. Cancel                  — keep the draft, do not send.
  *
  * Implementation notes (verified against opencode 1.18.x source and by
  * end-to-end testing in the TUI):
@@ -50,6 +54,7 @@ import {
   formatScheduleClock,
   isPeakTime,
   isTargetProvider,
+  msUntilOffPeak,
   nextOffPeakEnd,
 } from "./peak"
 
@@ -95,7 +100,21 @@ interface GuardState {
   promptRef: TuiPromptRef | undefined
   sessionID: string | undefined
   dialogOpen: boolean
+  /** Last `disabled` prop seen by the slot renderer (host gates the prompt). */
+  promptDisabled: boolean
+  /** Pending auto-submit timer (the "Auto-submit at off-peak" choice). */
+  autoSubmitTimer: ReturnType<typeof setTimeout> | undefined
+  /** Session the pending auto-submit was scheduled for. */
+  autoSubmitSessionID: string | undefined
+  /** Retry count while a dialog/gate blocks the auto-submit. */
+  autoSubmitAttempts: number
 }
+
+/** Retry cadence while a modal dialog or host gate blocks the auto-submit. */
+const AUTO_SUBMIT_RETRY_MS = 5_000
+
+/** Give up after this many retries (~1 minute of blocked submission). */
+const AUTO_SUBMIT_MAX_RETRIES = 12
 
 export const CostGuard: TuiPlugin = async (api, rawOptions) => {
   const options: CostGuardOptions = resolveOptions(rawOptions)
@@ -103,6 +122,10 @@ export const CostGuard: TuiPlugin = async (api, rawOptions) => {
     promptRef: undefined,
     sessionID: undefined,
     dialogOpen: false,
+    promptDisabled: false,
+    autoSubmitTimer: undefined,
+    autoSubmitSessionID: undefined,
+    autoSubmitAttempts: 0,
   }
 
   api.slots.register({
@@ -113,6 +136,7 @@ export const CostGuard: TuiPlugin = async (api, rawOptions) => {
         props: SessionPromptSlotProps,
       ) => {
         state.sessionID = props.session_id
+        state.promptDisabled = props.disabled === true
         return api.ui.Prompt({
           sessionID: props.session_id,
           visible: props.visible,
@@ -121,7 +145,12 @@ export const CostGuard: TuiPlugin = async (api, rawOptions) => {
             state.promptRef = ref
             props.ref?.(ref)
           },
-          onSubmit: props.on_submit,
+          // Any real submission (Enter, force key, our auto-submit) cancels a
+          // pending auto-submit timer so a draft is never sent twice.
+          onSubmit: () => {
+            cancelAutoSubmit(state)
+            props.on_submit?.()
+          },
         })
       },
     },
@@ -162,6 +191,7 @@ export const CostGuard: TuiPlugin = async (api, rawOptions) => {
   api.lifecycle.onDispose(() => {
     offIntercept()
     layerDispose()
+    cancelAutoSubmit(state)
   })
 }
 
@@ -221,16 +251,27 @@ async function handleKey(
   // then offer the peak-pricing choice instead.
   ctx.consume()
 
+  // A lock is already pending for this session: the dialog is a way to
+  // reschedule or release it (Enter can never submit while locked).
+  const lockPending = state.autoSubmitSessionID === sessionID
+
   api.ui.dialog.replace(
     () =>
       api.ui.DialogSelect({
-        title: `${providerLabel(model?.providerID)} peak pricing is active (x${options.multiplier})`,
+        title: `${providerLabel(model?.providerID)} peak pricing is active (x${options.multiplier})${
+          lockPending ? ` — auto-submit pending until ${offPeakLabel}` : ""
+        }`,
         placeholder: "How do you want to proceed?",
         options: [
           {
             title: "Send now",
             value: "now",
             description: `Submit immediately at x${options.multiplier} the normal price`,
+          },
+          {
+            title: lockPending ? "Reschedule auto-submit" : "Auto-submit at off-peak",
+            value: "auto",
+            description: `Lock the draft; send automatically at ${offPeakLabel} (Beijing time) when the peak window ends`,
           },
           {
             title: "Wait until off-peak",
@@ -246,8 +287,12 @@ async function handleKey(
         onSelect: (option) => {
           api.ui.dialog.clear()
           const prompt = state.promptRef
+          cancelAutoSubmit(state)
           if (option.value === "now") {
             prompt?.submit()
+          } else if (option.value === "auto") {
+            scheduleAutoSubmit(api, options, state)
+            prompt?.focus()
           } else if (option.value === "wait") {
             api.ui.toast({
               variant: "info",
@@ -272,6 +317,114 @@ async function handleForce(api: TuiPluginApi, state: GuardState): Promise<void> 
   const ref = state.promptRef
   if (api.ui.dialog.open || !ref?.focused) return
   ref.submit()
+}
+
+/** Drop a pending auto-submit timer (if any) and reset its bookkeeping. */
+function cancelAutoSubmit(state: GuardState): void {
+  if (state.autoSubmitTimer !== undefined) {
+    clearTimeout(state.autoSubmitTimer)
+    state.autoSubmitTimer = undefined
+  }
+  state.autoSubmitSessionID = undefined
+  state.autoSubmitAttempts = 0
+}
+
+/**
+ * Schedule the draft to be submitted when the current peak window ends.
+ * The timer is keyed to the session that was active when scheduled.
+ */
+function scheduleAutoSubmit(
+  api: TuiPluginApi,
+  options: CostGuardOptions,
+  state: GuardState,
+): void {
+  const now = new Date()
+  const offPeak = nextOffPeakEnd(now, options)
+  state.autoSubmitSessionID = state.sessionID
+  state.autoSubmitAttempts = 0
+  state.autoSubmitTimer = setTimeout(() => {
+    state.autoSubmitTimer = undefined
+    void fireAutoSubmit(api, options, state, offPeak)
+  }, msUntilOffPeak(now, options))
+
+  api.ui.toast({
+    variant: "info",
+    title: "Draft locked",
+    message: `The draft is locked until ${formatScheduleClock(offPeak, options.tzOffsetHours)} (Beijing time); it will be sent automatically. Press Enter to manage the lock.`,
+  })
+}
+
+/**
+ * Fire the scheduled auto-submit. Submits only when it is safe and still
+ * meaningful to do so; otherwise gives up with a toast (the draft is never
+ * sent at peak price, twice, or into the wrong session).
+ */
+async function fireAutoSubmit(
+  api: TuiPluginApi,
+  options: CostGuardOptions,
+  state: GuardState,
+  offPeak: Date,
+): Promise<void> {
+  const prompt = state.promptRef
+
+  // The scheduled session is no longer active: the draft may belong to a
+  // different conversation now. Keep it; do not submit.
+  if (!prompt || state.sessionID !== state.autoSubmitSessionID) {
+    api.ui.toast({
+      variant: "info",
+      title: "Auto-submit skipped",
+      message: "The active session changed; your draft was kept.",
+    })
+    return
+  }
+
+  // Safety net for pathological configurations (e.g. a 24h peak window where
+  // the computed "off-peak" moment is still inside a window): never send at
+  // the peak price.
+  if (isPeakTime(new Date(), options)) {
+    api.ui.toast({
+      variant: "warning",
+      title: "Still peak pricing",
+      message: "Peak pricing is still active; your draft was kept.",
+    })
+    return
+  }
+
+  if (prompt.current.input.trim().length === 0) {
+    api.ui.toast({
+      variant: "info",
+      title: "Auto-submit skipped",
+      message: "The draft is empty; nothing was sent.",
+    })
+    return
+  }
+
+  // A modal dialog or a host gate (pending permission/question, generation in
+  // flight) blocks submission right now. Retry shortly, then give up.
+  if (api.ui.dialog.open || state.promptDisabled) {
+    if (state.autoSubmitAttempts < AUTO_SUBMIT_MAX_RETRIES) {
+      state.autoSubmitAttempts += 1
+      state.autoSubmitTimer = setTimeout(() => {
+        state.autoSubmitTimer = undefined
+        void fireAutoSubmit(api, options, state, offPeak)
+      }, AUTO_SUBMIT_RETRY_MS)
+    } else {
+      api.ui.toast({
+        variant: "warning",
+        title: "Auto-submit gave up",
+        message: "A dialog or pending prompt blocked submission; your draft was kept.",
+      })
+    }
+    return
+  }
+
+  state.autoSubmitSessionID = undefined
+  prompt.submit()
+  api.ui.toast({
+    variant: "success",
+    title: "Sent at off-peak",
+    message: `Draft submitted automatically at ${formatScheduleClock(new Date(), options.tzOffsetHours)} (Beijing time).`,
+  })
 }
 
 function providerLabel(providerID: string | undefined): string {

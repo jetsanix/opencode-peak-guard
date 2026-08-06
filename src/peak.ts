@@ -90,6 +90,18 @@ export function nextOffPeakEnd(
   return new Date(dayStartShiftedMs + 86_400_000 + firstEndMs - tz * 3_600_000)
 }
 
+/**
+ * Milliseconds from `date` until the next off-peak moment (the end of the
+ * current or next peak window). Always positive for valid windows; used to
+ * schedule an auto-submit timer at the moment pricing returns to normal.
+ */
+export function msUntilOffPeak(
+  date: Date = new Date(),
+  options: PeakScheduleOptions = {},
+): number {
+  return nextOffPeakEnd(date, options).getTime() - date.getTime()
+}
+
 /** Format a Date as "HH:MM" in the schedule timezone. */
 export function formatScheduleClock(
   date: Date,

@@ -3,6 +3,7 @@ import {
   BEIJING_UTC_OFFSET_HOURS,
   isPeakTime,
   isTargetProvider,
+  msUntilOffPeak,
   nextOffPeakEnd,
   formatScheduleClock,
 } from "./peak"
@@ -80,6 +81,35 @@ describe("nextOffPeakEnd", () => {
   test("always strictly in the future for valid windows", () => {
     const now = beijing(2026, 8, 4, 11, 0)
     expect(nextOffPeakEnd(now).getTime()).toBeGreaterThan(now.getTime())
+  })
+})
+
+describe("msUntilOffPeak", () => {
+  test("delay equals the distance to the current window's end", () => {
+    const now = beijing(2026, 8, 4, 10, 30)
+    expect(msUntilOffPeak(now)).toBe(
+      beijing(2026, 8, 4, 12, 0).getTime() - now.getTime(),
+    )
+  })
+
+  test("afternoon window delay lands on 18:00", () => {
+    const now = beijing(2026, 8, 4, 15, 45)
+    expect(msUntilOffPeak(now)).toBe(
+      beijing(2026, 8, 4, 18, 0).getTime() - now.getTime(),
+    )
+  })
+
+  test("strictly positive for valid windows", () => {
+    expect(msUntilOffPeak(beijing(2026, 8, 4, 11, 59))).toBeGreaterThan(0)
+    expect(msUntilOffPeak(beijing(2026, 8, 4, 23, 59))).toBeGreaterThan(0)
+  })
+
+  test("honors custom windows", () => {
+    const now = beijing(2026, 8, 4, 20, 30)
+    const options = { windows: [[20, 22]] as const }
+    expect(msUntilOffPeak(now, options)).toBe(
+      beijing(2026, 8, 4, 22, 0).getTime() - now.getTime(),
+    )
   })
 })
 
